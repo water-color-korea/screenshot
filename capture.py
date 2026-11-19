@@ -12,6 +12,7 @@ import ctypes
 import ctypes.wintypes as wt
 import datetime
 import io
+import json
 import os
 import queue
 import struct
@@ -27,10 +28,30 @@ from PIL import ImageEnhance, ImageGrab, ImageTk
 SUBFOLDER = "캡쳐"          # 사진 폴더 안의 하위 폴더 이름 ("" 로 두면 사진 폴더에 바로 저장)
 HOTKEY_MOD = 0x0002 | 0x0004  # Ctrl + Shift
 HOTKEY_VK = ord("A")          # A
+LOW_JPG_QUALITY = 70          # 저용량 모드 JPG 품질 (1~95, 낮을수록 용량 작음)
 # ───────────────────────
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PID_FILE = os.path.join(BASE_DIR, "capture.pid")
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+MODES = {"high": "고화질 (PNG 원본)", "low": "저용량 (JPG)"}
+
+
+def load_mode():
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            m = json.load(f).get("mode")
+            return m if m in MODES else "high"
+    except Exception:
+        return "high"
+
+
+def save_mode(mode):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"mode": mode}, f)
+    except Exception:
+        pass
 
 # 고해상도(배율 125%, 150% 등) 화면에서도 좌표가 정확하도록
 try:
@@ -149,6 +170,7 @@ class App:
         self.root.withdraw()
         self.q = queue.Queue()
         self.busy = False
+        self.mode = load_mode()
         threading.Thread(target=hotkey_thread, args=(self.q,), daemon=True).start()
         self.root.after(100, self.poll)
 
@@ -205,6 +227,9 @@ class App:
         py = -self.vy + 40
         c.create_text(px, py, text="드래그해서 캡쳐할 영역 선택   ·   Esc / 우클릭 = 취소",
                       fill="white", font=("맑은 고딕", 13, "bold"))
+        self.mode_item = c.create_text(px, py + 30, text="", fill="#ffd54f", font=("맑은 고딕", 12, "bold"))
+        self.c = c
+        self.update_mode_text()
 
         self.top, self.c = top, c
         self.start = None
@@ -216,6 +241,10 @@ class App:
         c.bind("<ButtonRelease-1>", self.on_release)
         c.bind("<ButtonPress-3>", lambda e: self.close_overlay())
         top.bind("<Escape>", lambda e: self.close_overlay())
+        for w in (top, c):
+            w.bind("1", lambda e: self.set_mode("high"))
+            w.bind("2", lambda e: self.set_mode("low"))
+            w.bind("<Tab>", lambda e: self.set_mode("low" if self.mode == "high" else "high"))
         c.bind("<Escape>", lambda e: self.close_overlay())
 
         def grab_focus():
@@ -227,6 +256,16 @@ class App:
             except Exception:
                 pass
         top.after(20, grab_focus)
+
+    def update_mode_text(self):
+        other = "2 = 저용량" if self.mode == "high" else "1 = 고화질"
+        self.c.itemconfigure(self.mode_item, text=f"현재: {MODES[self.mode]}     (바꾸기: {other})")
+
+    def set_mode(self, mode):
+        self.mode = mode
+        save_mode(mode)
+        self.update_mode_text()
+        return "break"
 
     def _box(self, e):
         x0, y0 = self.start
@@ -263,14 +302,21 @@ class App:
         try:
             d = save_dir()
             name = f"캡쳐_{datetime.datetime.now():%Y%m%d_%H%M%S}"
-            path = os.path.join(d, name + ".png")
+            ext = ".jpg" if self.mode == "low" else ".png"
+            path = os.path.join(d, name + ext)
             n = 2
             while os.path.exists(path):
-                path = os.path.join(d, f"{name}_{n}.png")
+                path = os.path.join(d, f"{name}_{n}{ext}")
                 n += 1
-            img.save(path, "PNG")
+            if self.mode == "low":
+                img.convert("RGB").save(path, "JPEG", quality=LOW_JPG_QUALITY, optimize=True)
+            else:
+                img.save(path, "PNG")
             ok = copy_to_clipboard(self.hwnd(), path, img)
-            msg = f"캡쳐 저장 + 복사 완료\n{os.path.basename(path)}"
+            kb = os.path.getsize(path) / 1024
+            size = f"{kb:,.0f} KB" if kb < 1024 else f"{kb / 1024:,.1f} MB"
+            label = "고화질" if self.mode == "high" else "저용량"
+            msg = f"캡쳐 저장 + 복사 완료 ({label} · {size})\n{os.path.basename(path)}"
             if not ok:
                 msg = f"저장은 됐지만 복사 실패\n{os.path.basename(path)}"
             self.toast(msg)
